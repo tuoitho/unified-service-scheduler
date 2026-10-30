@@ -15,6 +15,14 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration,classpath:db/seed
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        timezone:
+          default_storage: NORMALIZE_UTC
   mvc:
     problemdetails:
       enabled: true
