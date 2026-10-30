@@ -1,0 +1,7 @@
+spring:
+  flyway:
+    locations: classpath:db/migration
+  datasource:
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 5
