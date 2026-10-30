@@ -18,8 +18,17 @@ BURST_SLOT="${TARGET_DATE}T14:00:00Z"
 gen_uuid() {
   if command -v uuidgen >/dev/null 2>&1; then
     uuidgen | tr '[:upper:]' '[:lower:]'
-  else
+  elif [ -r /proc/sys/kernel/random/uuid ]; then
     cat /proc/sys/kernel/random/uuid
+  elif [ -r /dev/urandom ]; then
+    local hex
+    hex=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    printf '%s-%s-4%s-a%s-%s\n' \
+      "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" "${hex:17:3}" "${hex:20:12}"
+  else
+    printf '%04x%04x-%04x-4%03x-%04x-%04x%04x%04x\n' \
+      $RANDOM $RANDOM $RANDOM $((RANDOM & 0x0fff)) \
+      $(((RANDOM & 0x3fff) | 0x8000)) $RANDOM $RANDOM $$
   fi
 }
 
@@ -47,18 +56,19 @@ echo "Demo Date (UTC) : ${TARGET_DATE}"
 echo ""
 
 echo "[1/7] Checking service health (/actuator/health)..."
-curl -fsS "${BASE_URL}/actuator/health"
-echo -e "\n"
+HEALTH_JSON=$(curl -fsS "${BASE_URL}/actuator/health")
+printf '      %.120s...\n\n' "${HEALTH_JSON}"
 
 echo "[2/7] Discovering seeded dealerships & service types..."
-curl -fsS "${BASE_URL}/api/v1/dealerships/${LONDON_DEALERSHIP_ID}" | head -c 260
-echo "..."
-curl -fsS "${BASE_URL}/api/v1/service-types" | head -c 260
-echo -e "...\n"
+DEALERSHIP_JSON=$(curl -fsS "${BASE_URL}/api/v1/dealerships/${LONDON_DEALERSHIP_ID}")
+SERVICE_TYPES_JSON=$(curl -fsS "${BASE_URL}/api/v1/service-types")
+printf '      Dealership : %.140s...\n' "${DEALERSHIP_JSON}"
+printf '      Catalog    : %.140s...\n\n' "${SERVICE_TYPES_JSON}"
 
 echo "[3/7] Checking real-time availability for OIL_CHANGE at ${MORNING_SLOT}..."
-curl -fsS "${BASE_URL}/api/v1/availability/check?dealershipId=${LONDON_DEALERSHIP_ID}&serviceTypeId=${OIL_CHANGE_ID}&startTime=${MORNING_SLOT}"
-echo -e "\n"
+AVAIL_JSON=$(curl -fsS "${BASE_URL}/api/v1/availability/check?dealershipId=${LONDON_DEALERSHIP_ID}&serviceTypeId=${OIL_CHANGE_ID}&startTime=${MORNING_SLOT}")
+echo "      ${AVAIL_JSON}"
+echo ""
 
 echo "[4/7] Booking single OIL_CHANGE appointment at ${MORNING_SLOT}..."
 SINGLE_RESP=$(curl -fsS -X POST "${BASE_URL}/api/v1/appointments" \
@@ -80,6 +90,8 @@ echo ""
 echo "[5/7] Firing 12 simultaneous EV_BATTERY_DIAG requests for ${BURST_SLOT}..."
 echo "      (London Flagship has 3 active bays, but only 2 EV_HIGH_VOLTAGE technicians: Priya & Liam)"
 for i in $(seq 1 12); do
+  CUST_UUID=$(gen_uuid)
+  VEH_UUID=$(gen_uuid)
   (
     STATUS=$(curl -s -o "${TMP_DIR}/body_${i}.json" -w "%{http_code}" \
       -X POST "${BASE_URL}/api/v1/appointments" \
@@ -87,8 +99,8 @@ for i in $(seq 1 12); do
       -H "X-Correlation-ID: demo-bash-burst-${i}" \
       -d "{
         \"dealershipId\": \"${LONDON_DEALERSHIP_ID}\",
-        \"customerId\": \"$(gen_uuid)\",
-        \"vehicleId\": \"$(gen_uuid)\",
+        \"customerId\": \"${CUST_UUID}\",
+        \"vehicleId\": \"${VEH_UUID}\",
         \"serviceTypeId\": \"${EV_DIAG_ID}\",
         \"desiredStartTime\": \"${BURST_SLOT}\",
         \"notes\": \"Concurrent EV burst #${i}\"
@@ -107,7 +119,7 @@ for i in $(seq 1 12); do
   STATUS=$(cat "${TMP_DIR}/status_${i}.txt")
   if [ "${STATUS}" = "201" ]; then
     CREATED_COUNT=$((CREATED_COUNT + 1))
-    APPT_ID=$(cat "${TMP_DIR}/body_${i}.json" | extract_id)
+    APPT_ID=$(extract_id < "${TMP_DIR}/body_${i}.json")
     BURST_IDS+=("${APPT_ID}")
     CREATED_APPOINTMENT_IDS+=("${APPT_ID}")
   elif [ "${STATUS}" = "409" ]; then
@@ -144,6 +156,7 @@ echo "      Re-book succeeded -> Appointment=${REBOOK_ID}"
 echo ""
 
 echo "[7/7] Inspecting Prometheus domain metrics (/actuator/prometheus)..."
-curl -fsS "${BASE_URL}/actuator/prometheus" | grep -E "^scheduler_booking_(requests_total|duration_seconds_count)" || true
+PROM_OUT=$(curl -fsS "${BASE_URL}/actuator/prometheus")
+printf '%s\n' "${PROM_OUT}" | grep -E "^scheduler_booking_(requests_total|duration_seconds_count)" | sed 's/^/      /' || true
 echo ""
 echo "Demo completed successfully with zero double-bookings!"
