@@ -1,0 +1,25 @@
+# Compiled class file & Maven build output
+target/
+*.class
+*.jar
+*.war
+*.ear
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE & OS metadata
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+.DS_Store
+Thumbs.db
+
+# Logs & local environment overrides
+*.log
+.env
+.env.local
+
+# Local assessment prompt reference
+/context
