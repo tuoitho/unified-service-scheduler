@@ -187,7 +187,7 @@ sequenceDiagram
     end
 
     Note over Svc,DB: Step 4: Persist Protected by btree_gist Exclusion Constraints
-    Svc->>Repo: insert(appointment)
+    Svc->>Repo: saveAndFlush(appointment)
     Repo->>DB: INSERT INTO appointments (...) VALUES (...)
     Svc->>DB: COMMIT TRANSACTION
     Svc-->>API: AppointmentResponse
@@ -226,7 +226,7 @@ A naive application-level "check availability then insert" suffers from **Time-O
 | **Database** | **PostgreSQL 16 (`btree_gist`)** | Industry-leading ACID relational engine with native range types (`tstzrange`), GiST exclusion constraints for storage-level overlap prevention, `SKIP LOCKED` row locking, and 64-bit transaction-scoped advisory locks. |
 | **Schema Migrations** | **Flyway** | Guarantees deterministic, version-controlled schema evolution across local dev, Testcontainers CI, and Docker production deployments, with clean separation between DDL (`db/migration`) and demo fixtures (`db/seed`). |
 | **Observability** | **Actuator + Micrometer + Prometheus + OTel Bridge** | Exposes `/actuator/prometheus` histograms/counters, `/actuator/health` liveness/readiness probes, W3C trace context propagation, and Logstash/ECS JSON structured logs. |
-| **API Contract & Harness** | **SpringDoc OpenAPI 3.0 + Swagger UI** | Generates an accurate OpenAPI 3.0 contract (`/v3/api-docs`) and interactive browser harness (`/swagger-ui.html`) directly from controller annotations and validation constraints. |
+| **API Contract & Harness** | **SpringDoc OpenAPI 3.1 + Swagger UI** | Generates an accurate OpenAPI 3.1 contract (`/v3/api-docs`) and interactive browser harness (`/swagger-ui.html`) directly from controller annotations and validation constraints. |
 | **Verification Suite** | **JUnit 5 + Testcontainers (`postgres:16-alpine`)** | Executes repository, HTTP API, and 50-thread `CyclicBarrier` concurrency stress tests against a real PostgreSQL 16 engine rather than H2 mocks, proving that `btree_gist` and row-locking semantics behave identically to production. |
 
 ---
