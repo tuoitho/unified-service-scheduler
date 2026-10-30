@@ -14,11 +14,14 @@ import com.keyloop.scheduler.exception.SchedulingConflictException;
 import com.keyloop.scheduler.support.AbstractPostgresIntegrationTest;
 import com.keyloop.scheduler.support.TestFixtures;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -39,6 +42,9 @@ class AppointmentServiceIntegrationTest extends AbstractPostgresIntegrationTest 
 
     @Autowired
     private MeterRegistry meterRegistry;
+
+    @Autowired
+    private DataSource dataSource;
 
     @Test
     void booksAppointmentEnforcesDistinctConflictReasonsCancelsAndRecordsMetrics() {
@@ -150,9 +156,7 @@ class AppointmentServiceIntegrationTest extends AbstractPostgresIntegrationTest 
                 jdbcClient, "S60-" + UUID.randomUUID().toString().substring(0, 8),
                 "60m Service", 60, "GENERAL");
 
-        // Book Bay 1 [09:00, 09:30) and Bay 2? Wait: booking [09:00, 09:30) takes Bay 1,
-        // and to occupy Bay 2 at [09:30, 10:00), temporarily book Bay 1 at [09:30, 10:00) AND Bay 2 at [09:30, 10:00),
-        // then cancel Bay 1's [09:30, 10:00) so Bay 1=[09:00,09:30) and Bay 2=[09:30,10:00)!
+        // Occupy Bay 1 on [09:00, 09:30) and Bay 2 on [09:30, 10:00) so neither bay is continuously free across [09:00, 10:00)
         appointmentService.bookAppointment(new BookAppointmentRequest(
                 dealershipId, UUID.randomUUID(), UUID.randomUUID(), svc30,
                 OffsetDateTime.parse("2026-12-12T09:00:00Z"), null));
@@ -189,5 +193,69 @@ class AppointmentServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         assertThatThrownBy(() -> availabilityService.getDailyAvailability(
                 UUID.randomUUID(), svc60, LocalDate.of(2026, 12, 12), 30))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void doesNotLeakUntrustedDealershipUuidIntoPrometheusMetricTagsWhenDealershipNotFound() {
+        UUID untrustedDealershipId = UUID.randomUUID();
+        BookAppointmentRequest unknownDealershipReq = new BookAppointmentRequest(
+                untrustedDealershipId,
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                OffsetDateTime.parse("2026-12-15T10:00:00Z"),
+                null);
+
+        assertThatThrownBy(() -> appointmentService.bookAppointment(unknownDealershipReq))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .extracting("errorCode")
+                .isEqualTo("DEALERSHIP_NOT_FOUND");
+
+        assertThat(meterRegistry.find("scheduler_booking_requests_total")
+                .tag("dealership_id", untrustedDealershipId.toString())
+                .counter()).isNull();
+
+        assertThat(meterRegistry.counter(
+                "scheduler_booking_requests_total",
+                "outcome", "not_found",
+                "dealership_id", "unknown").count()).isGreaterThanOrEqualTo(1.0);
+    }
+
+    @Test
+    void translatesPostgresLockTimeoutInto409ResourceContentionConflictInsteadOf500() throws Exception {
+        UUID dealershipId = TestFixtures.insertDealership(
+                jdbcClient, "LOCK-DL-" + UUID.randomUUID().toString().substring(0, 8),
+                "Keyloop Oxford", "UTC", LocalTime.of(8, 0), LocalTime.of(18, 0));
+        UUID soleBayId = TestFixtures.insertServiceBay(jdbcClient, dealershipId, "BAY-01", "Bay 1", true);
+        TestFixtures.insertTechnician(
+                jdbcClient, dealershipId, "OX-T1-" + UUID.randomUUID().toString().substring(0, 8),
+                "Owen Hughes", true, List.of("GENERAL"));
+        UUID serviceTypeId = TestFixtures.insertServiceType(
+                jdbcClient, "OX-S1-" + UUID.randomUUID().toString().substring(0, 8),
+                "Oil Service", 60, "GENERAL");
+
+        try (Connection blocker = dataSource.getConnection()) {
+            blocker.setAutoCommit(false);
+            try (PreparedStatement ps = blocker.prepareStatement(
+                    "SELECT id FROM service_bays WHERE id = ? FOR NO KEY UPDATE")) {
+                ps.setObject(1, soleBayId);
+                ps.executeQuery();
+            }
+
+            BookAppointmentRequest req = new BookAppointmentRequest(
+                    dealershipId,
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    serviceTypeId,
+                    OffsetDateTime.parse("2026-12-18T10:00:00Z"),
+                    null);
+
+            assertThatThrownBy(() -> appointmentService.bookAppointment(req))
+                    .isInstanceOf(SchedulingConflictException.class)
+                    .extracting("errorCode")
+                    .isEqualTo("RESOURCE_CONTENTION_TIMEOUT");
+
+            blocker.rollback();
+        }
     }
 }

@@ -23,11 +23,14 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -37,6 +40,8 @@ public class AppointmentService {
 
     private static final Logger log = LoggerFactory.getLogger(AppointmentService.class);
     private static final String PSQL_EXCLUSION_VIOLATION_SQLSTATE = "23P01";
+    private static final String PSQL_LOCK_NOT_AVAILABLE_SQLSTATE = "55P03";
+    private static final String PSQL_DEADLOCK_DETECTED_SQLSTATE = "40P01";
 
     private final DealershipRepository dealershipRepository;
     private final ServiceTypeRepository serviceTypeRepository;
@@ -67,14 +72,16 @@ public class AppointmentService {
     public AppointmentResponse bookAppointment(BookAppointmentRequest request) {
         Timer.Sample timerSample = schedulerMetrics.startBookingTimer();
         String outcome = "error";
+        AtomicReference<UUID> verifiedDealershipId = new AtomicReference<>();
         try {
-            AppointmentResponse response = transactionTemplate.execute(status -> executeBookingInTransaction(request));
+            AppointmentResponse response = transactionTemplate.execute(
+                    status -> executeBookingInTransaction(request, verifiedDealershipId));
             outcome = "confirmed";
             return response;
         } catch (SchedulingConflictException ex) {
             outcome = mapConflictOutcomeTag(ex.getErrorCode());
             log.warn("Booking conflict errorCode={} dealershipId={} desiredStartTime={}",
-                    ex.getErrorCode(), request.dealershipId(), request.desiredStartTime());
+                    ex.getErrorCode(), verifiedDealershipId.get(), request.desiredStartTime());
             throw ex;
         } catch (BusinessValidationException ex) {
             outcome = "validation_error";
@@ -82,37 +89,54 @@ public class AppointmentService {
         } catch (ResourceNotFoundException ex) {
             outcome = "not_found";
             throw ex;
-        } catch (DataIntegrityViolationException ex) {
-            if (isExclusionConstraintViolation(ex)) {
+        } catch (DataAccessException ex) {
+            if (hasSqlState(ex, PSQL_EXCLUSION_VIOLATION_SQLSTATE)) {
                 outcome = "conflict_constraint";
                 log.warn("Database exclusion constraint prevented overlapping booking dealershipId={} desiredStartTime={}",
-                        request.dealershipId(), request.desiredStartTime());
+                        verifiedDealershipId.get(), request.desiredStartTime());
                 throw new SchedulingConflictException(
                         "RESOURCE_CONFLICT",
                         "Requested time window is no longer available due to a concurrent booking",
                         ex);
             }
+            if (ex instanceof PessimisticLockingFailureException
+                    || hasSqlState(ex, PSQL_LOCK_NOT_AVAILABLE_SQLSTATE)
+                    || hasSqlState(ex, PSQL_DEADLOCK_DETECTED_SQLSTATE)) {
+                outcome = "conflict_contention";
+                log.warn("Database lock contention timeout dealershipId={} desiredStartTime={}",
+                        verifiedDealershipId.get(), request.desiredStartTime());
+                throw new SchedulingConflictException(
+                        "RESOURCE_CONTENTION_TIMEOUT",
+                        "Dealership scheduling resources are temporarily busy under concurrent load; please retry",
+                        ex);
+            }
             throw ex;
         } finally {
-            schedulerMetrics.recordBookingOutcome(outcome, request.dealershipId());
+            schedulerMetrics.recordBookingOutcome(outcome, verifiedDealershipId.get());
             schedulerMetrics.stopBookingTimer(timerSample, outcome);
         }
     }
 
-    private AppointmentResponse executeBookingInTransaction(BookAppointmentRequest request) {
+    private AppointmentResponse executeBookingInTransaction(
+            BookAppointmentRequest request,
+            AtomicReference<UUID> verifiedDealershipId
+    ) {
         appointmentRepository.configureBookingLockTimeout();
 
         Dealership dealership = dealershipRepository.findById(request.dealershipId())
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "DEALERSHIP_NOT_FOUND",
                         "Dealership not found: " + request.dealershipId()));
+        verifiedDealershipId.set(dealership.getId());
 
         ServiceType serviceType = serviceTypeRepository.findById(request.serviceTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "SERVICE_TYPE_NOT_FOUND",
                         "Service type not found: " + request.serviceTypeId()));
 
-        OffsetDateTime startTimeUtc = request.desiredStartTime().withOffsetSameInstant(ZoneOffset.UTC);
+        OffsetDateTime startTimeUtc = request.desiredStartTime()
+                .withOffsetSameInstant(ZoneOffset.UTC)
+                .truncatedTo(ChronoUnit.MICROS);
         OffsetDateTime endTimeUtc = startTimeUtc.plusMinutes(serviceType.getDurationMinutes());
 
         timeWindowValidator.validateBookingWindow(dealership, startTimeUtc, endTimeUtc);
@@ -140,7 +164,9 @@ public class AppointmentService {
                         String.format("No technician holding qualification '%s' is available for the requested time window",
                                 requiredQual)));
 
-        OffsetDateTime nowUtc = OffsetDateTime.now(clock).withOffsetSameInstant(ZoneOffset.UTC);
+        OffsetDateTime nowUtc = OffsetDateTime.now(clock)
+                .withOffsetSameInstant(ZoneOffset.UTC)
+                .truncatedTo(ChronoUnit.MICROS);
         Appointment appointment = new Appointment(
                 UUID.randomUUID(),
                 dealership,
@@ -218,7 +244,9 @@ public class AppointmentService {
                         "APPOINTMENT_NOT_FOUND",
                         "Appointment not found: " + id));
 
-        OffsetDateTime nowUtc = OffsetDateTime.now(clock).withOffsetSameInstant(ZoneOffset.UTC);
+        OffsetDateTime nowUtc = OffsetDateTime.now(clock)
+                .withOffsetSameInstant(ZoneOffset.UTC)
+                .truncatedTo(ChronoUnit.MICROS);
         if (appointment.cancel(nowUtc)) {
             appointmentRepository.flush();
             log.info("Cancelled appointment id={} dealershipCode={}", id, appointment.getDealership().getCode());
@@ -231,15 +259,16 @@ public class AppointmentService {
             case "NO_SERVICE_BAY_AVAILABLE" -> "conflict_bay";
             case "NO_QUALIFIED_TECHNICIAN_AVAILABLE" -> "conflict_technician";
             case "VEHICLE_ALREADY_BOOKED" -> "conflict_vehicle";
+            case "RESOURCE_CONTENTION_TIMEOUT" -> "conflict_contention";
             default -> "conflict_other";
         };
     }
 
-    private boolean isExclusionConstraintViolation(Throwable throwable) {
+    private boolean hasSqlState(Throwable throwable, String expectedSqlState) {
         Throwable cursor = throwable;
         while (cursor != null) {
             if (cursor instanceof SQLException sqlEx
-                    && PSQL_EXCLUSION_VIOLATION_SQLSTATE.equals(sqlEx.getSQLState())) {
+                    && expectedSqlState.equals(sqlEx.getSQLState())) {
                 return true;
             }
             cursor = cursor.getCause();

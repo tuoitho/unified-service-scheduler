@@ -27,4 +27,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=25s --retries=6 \
     CMD wget -qO- http://localhost:8080/actuator/health/readiness || exit 1
 
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-XX:+UseZGC", "org.springframework.boot.loader.launch.JarLauncher"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-XX:+UseZGC", "-XX:+ZGenerational", "org.springframework.boot.loader.launch.JarLauncher"]

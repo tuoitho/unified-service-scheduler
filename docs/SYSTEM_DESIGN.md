@@ -23,7 +23,7 @@ Real-world dealership scheduling involves domain nuances not fully enumerated in
 ```mermaid
 flowchart TB
     subgraph Client_Layer ["Client & Test Harness Layer (Mocked Frontend)"]
-        Swagger["Swagger UI & OpenAPI 3.0 Spec\n(/swagger-ui.html, /v3/api-docs)"]
+        Swagger["Swagger UI & OpenAPI 3.1 Spec\n(/swagger-ui.html, /v3/api-docs)"]
         Scripts["CLI Demo & Concurrency Harness\n(scripts/demo.ps1, scripts/demo.sh, JUnit Virtual Threads)"]
     end
 
@@ -163,7 +163,7 @@ sequenceDiagram
     end
 
     Note over Svc,DB: Step 1: Transaction-scoped Vehicle Lock & Overlap Check
-    Svc->>Repo: lockVehicleAndCheckOverlap(vehicleId, startTime, endTime)
+    Svc->>Repo: lockVehicleAndHasOverlap(vehicleId, startTime, endTime)
     Repo->>DB: SELECT pg_advisory_xact_lock(hashtextextended(vehicleId, 0)) + EXISTS overlap
     alt Vehicle Already Has Overlapping Appointment
         Svc->>DB: ROLLBACK
@@ -172,7 +172,7 @@ sequenceDiagram
 
     Note over Svc,DB: Step 2: Acquire ServiceBay (Fast-Path SKIP LOCKED + Deterministic Fallback)
     Svc->>Repo: acquireAvailableServiceBay(dealershipId, startTime, endTime)
-    Repo->>DB: SELECT ... FOR UPDATE OF sb SKIP LOCKED + Post-Lock Fresh Snapshot Check
+    Repo->>DB: SAVEPOINT + FOR NO KEY UPDATE OF sb SKIP LOCKED + Fresh Snapshot Check
     alt No ServiceBay Free Across [startTime, endTime)
         Svc->>DB: ROLLBACK
         API-->>Client: 409 Conflict (NO_SERVICE_BAY_AVAILABLE)
@@ -180,7 +180,7 @@ sequenceDiagram
 
     Note over Svc,DB: Step 3: Acquire Least-Specialized Qualified Technician
     Svc->>Repo: acquireAvailableQualifiedTechnician(dealershipId, qualification, startTime, endTime)
-    Repo->>DB: SELECT ... ORDER BY skill_count ASC FOR UPDATE OF t SKIP LOCKED + Verify
+    Repo->>DB: SAVEPOINT + ORDER BY skill_count ASC FOR NO KEY UPDATE OF t SKIP LOCKED + Verify
     alt No Qualified Technician Free Across [startTime, endTime)
         Svc->>DB: ROLLBACK
         API-->>Client: 409 Conflict (NO_QUALIFIED_TECHNICIAN_AVAILABLE)
@@ -203,9 +203,9 @@ A naive application-level "check availability then insert" suffers from **Time-O
    `(1) pg_advisory_xact_lock(vehicle_id)` $\rightarrow$ `(2) service_bays` $\rightarrow$ `(3) technicians`.
    When multiple rows within a table are locked in fallback mode, they are locked in ascending `id` order (`ORDER BY id ASC`). Because no two transactions can invert this partial order, circular lock waits (deadlocks) cannot occur.
 
-2. **Hybrid Fast-Path `SKIP LOCKED` + Fresh-Snapshot Verification + Contention Fallback:**
-   * **Fast Path:** Candidate bays and technicians without overlapping confirmed appointments are queried with `FOR UPDATE ... SKIP LOCKED LIMIT 1`. Concurrent requests for the *same* time slot at a multi-bay dealership immediately lock distinct bays and technicians in parallel without blocking one another. Once locked, a lightweight `NOT EXISTS` query executes under a **fresh post-lock `READ COMMITTED` statement snapshot**, eliminating the microsecond window where a prior lock holder committed right after the outer `SELECT` snapshot began.
-   * **Contention Fallback:** Because `service_bays` and `technicians` have one row per physical resource, an in-flight transaction booking *Monday 09:00* briefly holds a row lock on `Bay 1`. If a concurrent request for *Tuesday 14:00* on a 1-bay dealership used `SKIP LOCKED` alone, it would skip `Bay 1` and falsely return `409 Conflict`. When the fast path yields no rows, the repository falls back to locking the dealership's active resources in `id ASC` order (`FOR UPDATE`) and re-evaluating overlap on a fresh snapshot—waiting ~1 ms for the unrelated transaction to commit and succeeding with zero false conflicts.
+2. **Hybrid Fast-Path `SKIP LOCKED` + `SAVEPOINT` Fresh-Snapshot Verification + Contention Fallback:**
+   * **Fast Path:** Candidate bays and technicians without overlapping confirmed appointments are queried with `FOR NO KEY UPDATE ... SKIP LOCKED LIMIT 1` inside a lightweight JDBC `SAVEPOINT`. Concurrent requests for the *same* time slot at a multi-bay dealership immediately lock distinct bays and technicians in parallel without blocking one another, and `FOR NO KEY UPDATE` avoids unnecessary contention with foreign-key `FOR KEY SHARE` checks. Once locked, a `NOT EXISTS` query executes under a **fresh post-lock `READ COMMITTED` statement snapshot**, eliminating the microsecond window where a prior lock holder committed right after the outer `SELECT` snapshot began. If a candidate fails post-lock verification, rolling back to the candidate `SAVEPOINT` immediately releases that row lock so zero out-of-order locks are retained.
+   * **Contention Fallback:** Because `service_bays` and `technicians` have one row per physical resource, an in-flight transaction booking *Monday 09:00* briefly holds a row lock on `Bay 1`. If a concurrent request for *Tuesday 14:00* on a 1-bay dealership used `SKIP LOCKED` alone, it would skip `Bay 1` and falsely return `409 Conflict`. When the fast path yields no rows (with zero fast-path row locks held), the repository falls back to locking the dealership's active resources in strict `id ASC` order (`FOR NO KEY UPDATE`) and re-evaluating overlap on a fresh snapshot—waiting ~1 ms for the unrelated transaction to commit and succeeding with zero false conflicts and zero AB-BA deadlock possibility.
 
 3. **PostgreSQL `btree_gist` Exclusion Constraints (Physical Storage Guarantee):**
    The `appointments` table enforces three partial GiST exclusion constraints using half-open timestamp ranges `tstzrange(start_time, end_time, '[)')`:

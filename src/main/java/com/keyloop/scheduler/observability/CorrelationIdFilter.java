@@ -44,12 +44,19 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
             return UUID.randomUUID().toString();
         }
         String trimmed = candidate.trim();
-        if (trimmed.isEmpty()
-                || trimmed.length() > MAX_CORRELATION_ID_LENGTH
-                || trimmed.indexOf('\r') >= 0
-                || trimmed.indexOf('\n') >= 0) {
+        if (trimmed.isEmpty() || trimmed.length() > MAX_CORRELATION_ID_LENGTH || !isPrintableAscii(trimmed)) {
             return UUID.randomUUID().toString();
         }
         return trimmed;
+    }
+
+    private boolean isPrintableAscii(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch < 0x20 || ch >= 0x7F) {
+                return false;
+            }
+        }
+        return true;
     }
 }

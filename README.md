@@ -64,7 +64,7 @@ docker compose down -v
 ## Local Development & Running Tests
 
 ### Prerequisites
-- **JDK 21** (Maven 3.9.9 is bundled via `./mvnw` / `.\mvnw.cmd`)
+- **JDK 21** (Maven 3.9.13 is bundled via `./mvnw` / `.\mvnw.cmd`)
 - **Docker** (used automatically by **Testcontainers** to spin up an isolated `postgres:16-alpine` instance—no manual local database installation required)
 
 ### Run the Full Automated Test Suite
@@ -81,15 +81,16 @@ docker compose down -v
 .\mvnw.cmd test "-Dtest=AppointmentConcurrencyIntegrationTest"
 ```
 
-### What the Test Suite Verifies (19 Automated Tests across 6 Suites)
+### What the Test Suite Verifies (21 Automated Tests across 7 Suites)
 | Test Suite | Type | Key Invariants Verified |
 | :--- | :--- | :--- |
 | `TimeWindowValidatorTest` | Unit | Dealership local operating hours, `Europe/London` BST summer offset conversion, midnight-spanning rejection, past-timestamp rejection |
 | `SchemaConstraintIntegrationTest` | DB / Flyway | PostgreSQL `btree_gist` overlap rejection (`23P01`) on `CONFIRMED` rows, `CANCELLED` row exemption, composite FK rejection of cross-dealership bays/technicians |
 | `AppointmentRepositoryIntegrationTest` | JPA + SQL | Half-open `[start, end)` boundary adjacency, whole-duration continuity across split bookings, `skill_count ASC` specialist preservation, inactive bay exclusion |
-| `AppointmentServiceIntegrationTest` | Domain Service | End-to-end booking, `VEHICLE_ALREADY_BOOKED` vs `NO_QUALIFIED_TECHNICIAN_AVAILABLE` conflict codes, cancellation & re-booking, daily slot grid generation, Micrometer counters |
+| `AppointmentServiceIntegrationTest` | Domain Service | End-to-end booking, distinct conflict codes, lock-timeout translation (`RESOURCE_CONTENTION_TIMEOUT`), bounded Prometheus metric cardinality on unknown `dealershipId`, cancellation & re-booking, daily slot grid generation |
 | `AppointmentConcurrencyIntegrationTest` | Stress (`CyclicBarrier` + Java 21 Virtual Threads) | **50 simultaneous threads** on 3 bays + 2 qualified techs $\rightarrow$ exact 2 confirmed / 48 conflicts; **20 simultaneous threads** for same `vehicleId` $\rightarrow$ exact 1 confirmed; **10 concurrent non-overlapping bookings** on 1-bay dealership $\rightarrow$ all 10 confirmed (zero false `SKIP LOCKED` conflicts); concurrent specialist preservation |
-| `AppointmentApiIntegrationTest` & `SeedDataSmokeIntegrationTest` | Full HTTP + Seed | `201/200/400/404/409/422` HTTP contracts, RFC 7807 `ProblemDetail` fields, `X-Correlation-ID` propagation, Actuator/Prometheus/OpenAPI endpoints, and seed fixture smoke validation |
+| `AppointmentApiIntegrationTest` | Full HTTP | `201/200/400/404/409/422` HTTP contracts, RFC 7807 `ProblemDetail` fields, `X-Correlation-ID` propagation, Actuator/Prometheus/OpenAPI 3.1 endpoints |
+| `SeedDataSmokeIntegrationTest` | Seed Smoke | Repeatable `R__seed_demo_data.sql` execution and catalog API discovery |
 
 ---
 
@@ -113,9 +114,9 @@ docker compose down -v
 
 ```text
 ├── docs/
-│   ├── SYSTEM_DESIGN.md          # Deliverable 1: Architecture, concurrency, observability & AI design notes
+│   ├── SYSTEM_DESIGN.md          # Architecture, concurrency, observability & AI design notes
 │   ├── API_AND_DEMO_GUIDE.md     # Seed reference tables, cURL examples, error catalog & demo walkthrough
-│   └── openapi.json              # Exported OpenAPI 3.0 contract
+│   └── openapi.json              # Exported OpenAPI 3.1 contract
 ├── scripts/
 │   ├── demo.ps1                  # PowerShell E2E & 12-request concurrent burst harness
 │   └── demo.sh                   # Bash E2E & 12-request concurrent burst harness
@@ -123,7 +124,7 @@ docker compose down -v
 │   ├── main/
 │   │   ├── java/com/keyloop/scheduler/
 │   │   │   ├── api/              # REST controllers & request/response Java record DTOs
-│   │   │   ├── config/           # Clock & OpenAPI 3.0 configuration
+│   │   │   ├── config/           # Clock & OpenAPI 3.1 configuration
 │   │   │   ├── domain/           # JPA @Entity aggregates & AppointmentStatus enum
 │   │   │   ├── exception/        # Domain exceptions & RFC 7807 GlobalExceptionHandler
 │   │   │   ├── observability/    # CorrelationIdFilter & Micrometer SchedulerMetrics
@@ -155,7 +156,7 @@ Several subtle distributed-systems and framework edge cases surfaced during revi
    - *Issue Identified:* A naive `SELECT ... WHERE NOT EXISTS (overlapping appointment) FOR UPDATE SKIP LOCKED LIMIT 1` suffers from two production bugs:
      - Under PostgreSQL `READ COMMITTED`, `FOR UPDATE` waits/skips locked rows on `service_bays`, **not** `appointments`. If Transaction A commits a new appointment *while* a fallback lock wait occurs, Transaction B's statement snapshot on `appointments` can miss the newly committed overlap until hitting a raw constraint exception.
      - On a 1-bay dealership, if two customers concurrently book **non-overlapping** slots (`09:00` and `14:00`), `SKIP LOCKED` skips the sole bay row locked by the other transaction and falsely returns `409 No Bay Available`.
-   - *Refinement & Proof:* Redesigned [`AppointmentLockingRepositoryImpl`](src/main/java/com/keyloop/scheduler/repository/AppointmentLockingRepositoryImpl.java) with a two-phase algorithm: a non-blocking `SKIP LOCKED` fast path followed by a post-lock fresh-snapshot overlap re-check, plus a deterministic `ORDER BY id ASC FOR UPDATE` contention fallback when bays exist without committed overlaps. Verified via [`AppointmentConcurrencyIntegrationTest`](src/test/java/com/keyloop/scheduler/concurrency/AppointmentConcurrencyIntegrationTest.java) (`tenConcurrentNonOverlappingRequestsOnSingleBayDealershipAllSucceedWithZeroFalseConflicts`).
+   - *Refinement & Proof:* Redesigned [`AppointmentLockingRepositoryImpl`](src/main/java/com/keyloop/scheduler/repository/AppointmentLockingRepositoryImpl.java) with a two-phase algorithm: a non-blocking `SKIP LOCKED` fast path wrapped in candidate `SAVEPOINT`s followed by a post-lock fresh-snapshot overlap re-check, plus a deterministic `ORDER BY id ASC FOR NO KEY UPDATE` contention fallback when bays exist without committed overlaps. Verified via [`AppointmentConcurrencyIntegrationTest`](src/test/java/com/keyloop/scheduler/concurrency/AppointmentConcurrencyIntegrationTest.java) (`tenConcurrentNonOverlappingBookingsOnSingleBayDealershipAllSucceedWithoutFalseConflicts`).
 
 2. **Hibernate 6 `LocalTime` Timezone Shift on Non-UTC Hosts:**
    - *Issue Identified:* Configuring legacy `hibernate.jdbc.time_zone=UTC` caused `LocalTime.of(8, 30)` (`SQL TIME WITHOUT TIME ZONE`) to shift through `java.sql.Time` `Calendar` conversion on a `UTC+07:00` workstation, failing repository assertions immediately.

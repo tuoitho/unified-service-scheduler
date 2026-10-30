@@ -2,6 +2,7 @@ package com.keyloop.scheduler.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.keyloop.scheduler.api.dto.AppointmentResponse;
 import com.keyloop.scheduler.api.dto.AvailabilityCheckResponse;
 import com.keyloop.scheduler.api.dto.BookAppointmentRequest;
@@ -9,6 +10,8 @@ import com.keyloop.scheduler.api.dto.DailyAvailabilityResponse;
 import com.keyloop.scheduler.domain.AppointmentStatus;
 import com.keyloop.scheduler.support.AbstractPostgresIntegrationTest;
 import com.keyloop.scheduler.support.TestFixtures;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -32,6 +35,9 @@ class AppointmentApiIntegrationTest extends AbstractPostgresIntegrationTest {
 
     @Autowired
     private JdbcClient jdbcClient;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @Test
     void fullHttpLifecycleBooksQueriesCancelsAndPropagatesCorrelationId() {
@@ -164,7 +170,7 @@ class AppointmentApiIntegrationTest extends AbstractPostgresIntegrationTest {
     }
 
     @Test
-    void exposesActuatorHealthPrometheusMetricsAndOpenApiSpecification() {
+    void exposesActuatorHealthPrometheusMetricsAndOpenApiSpecification() throws Exception {
         ResponseEntity<String> health = restTemplate.getForEntity("/actuator/health", String.class);
         assertThat(health.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(health.getBody()).contains("\"status\":\"UP\"");
@@ -177,5 +183,16 @@ class AppointmentApiIntegrationTest extends AbstractPostgresIntegrationTest {
         assertThat(openApi.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(openApi.getBody()).contains("Unified Service Scheduler API");
         assertThat(openApi.getBody()).contains("/api/v1/appointments");
+        assertThat(openApi.getBody()).contains("application/problem+json");
+        assertThat(openApi.getBody()).contains("ProblemDetail");
+
+        Path docsDir = Path.of("docs");
+        if (Files.isDirectory(docsDir)) {
+            Object parsed = objectMapper.readValue(openApi.getBody(), Object.class);
+            String formatted = objectMapper.writerWithDefaultPrettyPrinter()
+                    .writeValueAsString(parsed)
+                    .replace("\r\n", "\n") + "\n";
+            Files.writeString(docsDir.resolve("openapi.json"), formatted);
+        }
     }
 }

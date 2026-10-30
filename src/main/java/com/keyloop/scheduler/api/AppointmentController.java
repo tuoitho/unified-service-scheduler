@@ -5,6 +5,8 @@ import com.keyloop.scheduler.api.dto.BookAppointmentRequest;
 import com.keyloop.scheduler.domain.AppointmentStatus;
 import com.keyloop.scheduler.service.AppointmentService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -13,6 +15,8 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,10 +44,22 @@ public class AppointmentController {
                     + "for the full service duration before confirming the appointment."
     )
     @ApiResponse(responseCode = "201", description = "Appointment confirmed and resources allocated")
-    @ApiResponse(responseCode = "400", description = "Invalid request payload")
-    @ApiResponse(responseCode = "404", description = "Dealership or ServiceType not found")
-    @ApiResponse(responseCode = "409", description = "No available bay/qualified technician, or vehicle already booked")
-    @ApiResponse(responseCode = "422", description = "Requested time is in the past or outside operating hours")
+    @ApiResponse(
+            responseCode = "400",
+            description = "Invalid request payload",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(
+            responseCode = "404",
+            description = "Dealership or ServiceType not found",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(
+            responseCode = "409",
+            description = "No available bay/qualified technician, or vehicle already booked",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(
+            responseCode = "422",
+            description = "Requested time is in the past or outside operating hours",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
     public ResponseEntity<AppointmentResponse> bookAppointment(
             @Valid @RequestBody BookAppointmentRequest request
     ) {
@@ -55,13 +71,21 @@ public class AppointmentController {
     @GetMapping("/{id}")
     @Operation(summary = "Get appointment by ID")
     @ApiResponse(responseCode = "200", description = "Appointment details returned")
-    @ApiResponse(responseCode = "404", description = "Appointment not found")
+    @ApiResponse(
+            responseCode = "404",
+            description = "Appointment not found",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
     public AppointmentResponse getAppointment(@PathVariable UUID id) {
         return appointmentService.getAppointment(id);
     }
 
     @GetMapping
     @Operation(summary = "List and filter appointments")
+    @ApiResponse(responseCode = "200", description = "Matching appointments returned")
+    @ApiResponse(
+            responseCode = "404",
+            description = "Dealership not found when filtering by date and dealershipId",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
     public List<AppointmentResponse> listAppointments(
             @RequestParam(required = false) UUID dealershipId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
@@ -78,7 +102,10 @@ public class AppointmentController {
             description = "Transitions an appointment to CANCELLED and immediately releases its bay and technician."
     )
     @ApiResponse(responseCode = "200", description = "Appointment cancelled")
-    @ApiResponse(responseCode = "404", description = "Appointment not found")
+    @ApiResponse(
+            responseCode = "404",
+            description = "Appointment not found",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE, schema = @Schema(implementation = ProblemDetail.class)))
     public AppointmentResponse cancelAppointment(@PathVariable UUID id) {
         return appointmentService.cancelAppointment(id);
     }

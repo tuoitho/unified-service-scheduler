@@ -3,6 +3,7 @@ package com.keyloop.scheduler.exception;
 import com.keyloop.scheduler.observability.CorrelationIdFilter;
 import jakarta.validation.ConstraintViolationException;
 import java.net.URI;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -26,6 +27,12 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    private final Clock clock;
+
+    public GlobalExceptionHandler(Clock clock) {
+        this.clock = clock;
+    }
 
     @ExceptionHandler(ResourceNotFoundException.class)
     public ProblemDetail handleNotFound(ResourceNotFoundException ex) {
@@ -131,7 +138,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     private void enrichMetadata(ProblemDetail problem) {
         Map<String, Object> props = problem.getProperties();
         if (props == null || !props.containsKey("timestamp")) {
-            problem.setProperty("timestamp", Instant.now().toString());
+            problem.setProperty("timestamp", Instant.now(clock).toString());
         }
         String correlationId = MDC.get(CorrelationIdFilter.MDC_KEY);
         if (correlationId != null && (props == null || !props.containsKey("correlationId"))) {

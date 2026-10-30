@@ -6,6 +6,9 @@ import com.keyloop.scheduler.domain.ServiceBay;
 import com.keyloop.scheduler.domain.Technician;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -14,23 +17,43 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.UncategorizedSQLException;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.stereotype.Repository;
 
 @Repository
 public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepository {
 
+    private static final Pattern VALID_PG_DURATION = Pattern.compile("^\\d+(ms|s|min)$");
+    private static final int MAX_LIST_RESULTS = 500;
+
     private final EntityManager entityManager;
     private final JdbcClient jdbcClient;
+    private final DataSource dataSource;
+    private final String lockTimeoutSetting;
 
-    public AppointmentLockingRepositoryImpl(EntityManager entityManager, JdbcClient jdbcClient) {
+    public AppointmentLockingRepositoryImpl(
+            EntityManager entityManager,
+            JdbcClient jdbcClient,
+            DataSource dataSource,
+            @Value("${scheduler.booking.lock-timeout:5s}") String lockTimeoutSetting
+    ) {
+        if (!VALID_PG_DURATION.matcher(lockTimeoutSetting).matches()) {
+            throw new IllegalArgumentException("Invalid PostgreSQL lock-timeout duration: " + lockTimeoutSetting);
+        }
         this.entityManager = entityManager;
         this.jdbcClient = jdbcClient;
+        this.dataSource = dataSource;
+        this.lockTimeoutSetting = lockTimeoutSetting;
     }
 
     @Override
     public void configureBookingLockTimeout() {
-        jdbcClient.sql("SET LOCAL lock_timeout = '5s'").update();
+        jdbcClient.sql("SET LOCAL lock_timeout = '" + lockTimeoutSetting + "'").update();
     }
 
     @Override
@@ -68,18 +91,30 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
         entityManager.flush();
         Set<UUID> inspectedBayIds = new HashSet<>();
 
-        // Fast path: non-blocking FOR UPDATE SKIP LOCKED + post-lock fresh-snapshot verification
-        while (true) {
-            Optional<UUID> candidateId = selectUnlockedCandidateBayId(
-                    dealershipId, startTime, endTime, inspectedBayIds);
-            if (candidateId.isEmpty()) {
-                break;
+        // Fast path: non-blocking FOR NO KEY UPDATE SKIP LOCKED inside a candidate SAVEPOINT so
+        // rejected snapshot-race candidates release their lock immediately and never retain out-of-order locks.
+        Connection txConnection = DataSourceUtils.getConnection(dataSource);
+        try {
+            while (true) {
+                Savepoint sp = txConnection.setSavepoint("fast_bay_candidate");
+                Optional<UUID> candidateId = selectUnlockedCandidateBayId(
+                        dealershipId, startTime, endTime, inspectedBayIds);
+                if (candidateId.isEmpty()) {
+                    txConnection.releaseSavepoint(sp);
+                    break;
+                }
+                UUID bayId = candidateId.get();
+                if (isBayStillFreeUnderFreshSnapshot(bayId, startTime, endTime)) {
+                    txConnection.releaseSavepoint(sp);
+                    return Optional.ofNullable(entityManager.find(ServiceBay.class, bayId));
+                }
+                txConnection.rollback(sp);
+                inspectedBayIds.add(bayId);
             }
-            UUID bayId = candidateId.get();
-            if (isBayStillFreeUnderFreshSnapshot(bayId, startTime, endTime)) {
-                return Optional.ofNullable(entityManager.find(ServiceBay.class, bayId));
-            }
-            inspectedBayIds.add(bayId);
+        } catch (SQLException ex) {
+            throw new UncategorizedSQLException("acquireAvailableServiceBay savepoint", null, ex);
+        } finally {
+            DataSourceUtils.releaseConnection(txConnection, dataSource);
         }
 
         // Contention fallback: lock active dealership bays in deterministic ID order so concurrent
@@ -90,7 +125,7 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
                 WHERE sb.dealership_id = :dealershipId
                   AND sb.is_active = TRUE
                 ORDER BY sb.id ASC
-                FOR UPDATE OF sb
+                FOR NO KEY UPDATE OF sb
                 """)
                 .param("dealershipId", dealershipId)
                 .query(UUID.class)
@@ -135,18 +170,30 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
         entityManager.flush();
         Set<UUID> inspectedTechnicianIds = new HashSet<>();
 
-        // Fast path: non-blocking SKIP LOCKED preferring least-specialized qualified technician
-        while (true) {
-            Optional<UUID> candidateId = selectUnlockedCandidateTechnicianId(
-                    dealershipId, qualificationCode, startTime, endTime, inspectedTechnicianIds);
-            if (candidateId.isEmpty()) {
-                break;
+        // Fast path: non-blocking SKIP LOCKED preferring least-specialized qualified technician,
+        // releasing any rejected candidate lock via SAVEPOINT before entering ID-ordered fallback.
+        Connection txConnection = DataSourceUtils.getConnection(dataSource);
+        try {
+            while (true) {
+                Savepoint sp = txConnection.setSavepoint("fast_tech_candidate");
+                Optional<UUID> candidateId = selectUnlockedCandidateTechnicianId(
+                        dealershipId, qualificationCode, startTime, endTime, inspectedTechnicianIds);
+                if (candidateId.isEmpty()) {
+                    txConnection.releaseSavepoint(sp);
+                    break;
+                }
+                UUID techId = candidateId.get();
+                if (isTechnicianStillFreeUnderFreshSnapshot(techId, startTime, endTime)) {
+                    txConnection.releaseSavepoint(sp);
+                    return loadManagedTechnicianWithSkills(techId);
+                }
+                txConnection.rollback(sp);
+                inspectedTechnicianIds.add(techId);
             }
-            UUID techId = candidateId.get();
-            if (isTechnicianStillFreeUnderFreshSnapshot(techId, startTime, endTime)) {
-                return loadManagedTechnicianWithSkills(techId);
-            }
-            inspectedTechnicianIds.add(techId);
+        } catch (SQLException ex) {
+            throw new UncategorizedSQLException("acquireAvailableQualifiedTechnician savepoint", null, ex);
+        } finally {
+            DataSourceUtils.releaseConnection(txConnection, dataSource);
         }
 
         // Contention fallback: lock active qualified technicians in deterministic ID order
@@ -162,7 +209,7 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
                         AND ts.qualification_code = :qualificationCode
                   )
                 ORDER BY t.id ASC
-                FOR UPDATE OF t
+                FOR NO KEY UPDATE OF t
                 """)
                 .param("dealershipId", dealershipId)
                 .param("qualificationCode", qualificationCode)
@@ -255,6 +302,7 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
 
         TypedQuery<Appointment> query = entityManager.createQuery(jpql.toString(), Appointment.class);
         params.forEach(query::setParameter);
+        query.setMaxResults(MAX_LIST_RESULTS);
         return query.getResultList();
     }
 
@@ -327,6 +375,8 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
                 FROM appointments a
                 WHERE a.dealership_id = :dealershipId
                   AND a.status = 'CONFIRMED'
+                  AND a.start_time < :windowEnd
+                  AND a.end_time > :windowStart
                   AND tstzrange(a.start_time, a.end_time, '[)')
                       && tstzrange(CAST(:windowStart AS TIMESTAMPTZ), CAST(:windowEnd AS TIMESTAMPTZ), '[)')
                 ORDER BY a.start_time ASC
@@ -365,7 +415,7 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
                             && tstzrange(CAST(:startTime AS TIMESTAMPTZ), CAST(:endTime AS TIMESTAMPTZ), '[)')
                   )
                 ORDER BY sb.bay_number ASC, sb.id ASC
-                FOR UPDATE OF sb SKIP LOCKED
+                FOR NO KEY UPDATE OF sb SKIP LOCKED
                 LIMIT 1
                 """;
 
@@ -434,7 +484,7 @@ public class AppointmentLockingRepositoryImpl implements AppointmentLockingRepos
                     FROM technician_skills ts_count
                     WHERE ts_count.technician_id = t.id
                 ) ASC, t.employee_code ASC, t.id ASC
-                FOR UPDATE OF t SKIP LOCKED
+                FOR NO KEY UPDATE OF t SKIP LOCKED
                 LIMIT 1
                 """;
 

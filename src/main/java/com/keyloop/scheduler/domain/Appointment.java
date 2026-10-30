@@ -8,15 +8,19 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.UUID;
+import org.springframework.data.domain.Persistable;
 
 @Entity
 @Table(name = "appointments")
-public class Appointment {
+public class Appointment implements Persistable<UUID> {
 
     @Id
     @Column(name = "id", nullable = false, updatable = false)
@@ -63,6 +67,9 @@ public class Appointment {
     @Column(name = "cancelled_at")
     private OffsetDateTime cancelledAt;
 
+    @Transient
+    private boolean isNew = true;
+
     protected Appointment() {
     }
 
@@ -102,6 +109,17 @@ public class Appointment {
         if (this.status == null) {
             this.status = AppointmentStatus.CONFIRMED;
         }
+    }
+
+    @PostPersist
+    @PostLoad
+    void markNotNew() {
+        this.isNew = false;
+    }
+
+    @Override
+    public boolean isNew() {
+        return this.isNew;
     }
 
     public boolean cancel(OffsetDateTime cancelledTimestamp) {

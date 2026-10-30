@@ -145,19 +145,21 @@ public class AvailabilityService {
                     .toOffsetDateTime()
                     .withOffsetSameInstant(ZoneOffset.UTC);
 
-            int freeBays = countContinuouslyFreeResources(activeBayIds, dayBookings, slotStartUtc, slotEndUtc, true);
-            int freeTechs = countContinuouslyFreeResources(
-                    qualifiedTechIds, dayBookings, slotStartUtc, slotEndUtc, false);
-            int maxConcurrent = Math.min(freeBays, freeTechs);
-            boolean bookable = maxConcurrent > 0 && !timeWindowValidator.isInPast(slotStartUtc);
-
-            slots.add(new TimeSlotAvailability(
-                    slotStartUtc,
-                    slotEndUtc,
-                    bookable,
-                    freeBays,
-                    freeTechs,
-                    bookable ? maxConcurrent : 0));
+            if (timeWindowValidator.isInPast(slotStartUtc)) {
+                slots.add(new TimeSlotAvailability(slotStartUtc, slotEndUtc, false, 0, 0, 0));
+            } else {
+                int freeBays = countContinuouslyFreeResources(activeBayIds, dayBookings, slotStartUtc, slotEndUtc, true);
+                int freeTechs = countContinuouslyFreeResources(
+                        qualifiedTechIds, dayBookings, slotStartUtc, slotEndUtc, false);
+                int maxConcurrent = Math.min(freeBays, freeTechs);
+                slots.add(new TimeSlotAvailability(
+                        slotStartUtc,
+                        slotEndUtc,
+                        maxConcurrent > 0,
+                        freeBays,
+                        freeTechs,
+                        maxConcurrent));
+            }
 
             cursor = cursor.plusMinutes(slotIntervalMinutes);
         }

@@ -86,14 +86,16 @@ Sample `201 Created` response:
   "durationMinutes": 90,
   "serviceBayId": "33333333-3333-3333-3333-333333333331",
   "serviceBayNumber": "BAY-01",
+  "serviceBayName": "Hydraulic Lift 1",
   "technicianId": "44444444-4444-4444-4444-444444444443",
-  "technicianCode": "LON-TECH-03",
+  "technicianEmployeeCode": "LON-TECH-03",
   "technicianName": "Priya Patel",
   "startTime": "2026-12-15T10:00:00Z",
   "endTime": "2026-12-15T11:30:00Z",
   "status": "CONFIRMED",
   "notes": "High-voltage battery cell balance check",
-  "createdAt": "2026-10-30T14:25:00Z"
+  "createdAt": "2026-10-30T14:25:00Z",
+  "cancelledAt": null
 }
 ```
 
@@ -118,10 +120,12 @@ Every error response includes `type`, `title`, `status`, `detail`, `instance`, `
 | `409 Conflict` | `VEHICLE_ALREADY_BOOKED` | Vehicle already holds an overlapping `CONFIRMED` appointment |
 | `409 Conflict` | `NO_SERVICE_BAY_AVAILABLE` | All active bays at the dealership are occupied during `[startTime, endTime)` |
 | `409 Conflict` | `NO_QUALIFIED_TECHNICIAN_AVAILABLE` | All active technicians holding `required_qualification` are occupied |
-| `409 Conflict` | `CONCURRENT_BOOKING_CONFLICT` | Database GiST exclusion constraint safety net caught an overlap |
+| `409 Conflict` | `RESOURCE_CONFLICT` | Database GiST exclusion constraint safety net caught a concurrent overlap |
+| `409 Conflict` | `RESOURCE_CONTENTION_TIMEOUT` | Lock wait exceeded configured `lock_timeout` under extreme contention |
 | `422 Unprocessable Entity` | `PAST_START_TIME` | `desiredStartTime` is in the past |
 | `422 Unprocessable Entity` | `OUTSIDE_OPERATING_HOURS` | `[startTime, endTime)` falls outside dealership local `open_time..close_time` or spans midnight |
 | `422 Unprocessable Entity` | `INVALID_SLOT_INTERVAL` | `slotIntervalMinutes` outside `[5, 240]` |
+| `500 Internal Server Error` | `INTERNAL_ERROR` | Unexpected unhandled runtime error |
 
 ---
 

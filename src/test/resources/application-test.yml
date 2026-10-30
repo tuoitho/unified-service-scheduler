@@ -5,3 +5,7 @@ spring:
     hikari:
       maximum-pool-size: 30
       minimum-idle: 5
+
+scheduler:
+  booking:
+    lock-timeout: 500ms
