@@ -30,17 +30,19 @@ A production-grade backend scheduling engine for automotive dealerships (**Domai
 ### Prerequisites
 - **Docker** (24+) and **Docker Compose** (v2+)
 
-### 1. Start PostgreSQL 16 & Unified Service Scheduler
+### 1. Start PostgreSQL 16, Scheduler API, Prometheus & Grafana
 ```bash
 docker compose up -d --build
 ```
-Flyway automatically applies [`V1__init_schema.sql`](src/main/resources/db/migration/V1__init_schema.sql) (including `btree_gist` exclusion constraints) and seeds two realistic dealerships (`Keyloop Flagship London West` and `Keyloop Manchester EV Hub`) via [`R__seed_demo_data.sql`](src/main/resources/db/seed/R__seed_demo_data.sql).
+Flyway automatically applies [`V1__init_schema.sql`](src/main/resources/db/migration/V1__init_schema.sql) (including `btree_gist` exclusion constraints) and seeds two realistic dealerships (`Keyloop Flagship London West` and `Keyloop Manchester EV Hub`) via [`R__seed_demo_data.sql`](src/main/resources/db/seed/R__seed_demo_data.sql). Prometheus and Grafana start automatically with a pre-provisioned real-time dashboard.
 
-### 2. Explore Interactive Client Harnesses
+### 2. Explore Interactive Client & Observability UIs
 - **Swagger UI:** [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
+- **Grafana Real-Time Dashboard (No login required):** [http://localhost:3000](http://localhost:3000)
+- **Prometheus UI:** [http://localhost:9090](http://localhost:9090)
 - **OpenAPI JSON:** [http://localhost:8080/v3/api-docs](http://localhost:8080/v3/api-docs)
 - **Health & Readiness:** [http://localhost:8080/actuator/health](http://localhost:8080/actuator/health)
-- **Prometheus Metrics:** [http://localhost:8080/actuator/prometheus](http://localhost:8080/actuator/prometheus)
+- **Raw Prometheus Metrics:** [http://localhost:8080/actuator/prometheus](http://localhost:8080/actuator/prometheus)
 
 ### 3. Run the End-to-End & Concurrency Demo Harness
 On **Windows (PowerShell)**:
@@ -117,6 +119,9 @@ docker compose down -v
 │   ├── SYSTEM_DESIGN.md          # Architecture, concurrency, observability & AI design notes
 │   ├── API_AND_DEMO_GUIDE.md     # Seed reference tables, cURL examples, error catalog & demo walkthrough
 │   └── openapi.json              # Exported OpenAPI 3.1 contract
+├── observability/
+│   ├── prometheus/               # Prometheus 5s scrape configuration (/actuator/prometheus)
+│   └── grafana/                  # Auto-provisioned datasource & Unified Service Scheduler dashboard
 ├── scripts/
 │   ├── demo.ps1                  # PowerShell E2E & 12-request concurrent burst harness
 │   └── demo.sh                   # Bash E2E & 12-request concurrent burst harness
@@ -135,7 +140,7 @@ docker compose down -v
 │   │       └── db/seed/          # R__seed_demo_data.sql (repeatable demo dealerships & technicians)
 │   └── test/                     # Testcontainers PostgreSQL integration, API, unit & concurrency suites
 ├── Dockerfile                    # Multi-stage layered Java 21 Alpine build (non-root runtime)
-└── docker-compose.yml            # One-command PostgreSQL 16 + Scheduler API stack
+└── docker-compose.yml            # One-command PostgreSQL 16 + Scheduler API + Prometheus + Grafana stack
 ```
 
 ---

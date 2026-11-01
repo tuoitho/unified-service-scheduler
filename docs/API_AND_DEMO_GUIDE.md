@@ -12,6 +12,7 @@ Because this repository implements the **Backend Service & Persistence Layer** o
 | :--- | :--- | :--- |
 | **Swagger UI** | `http://localhost:8080/swagger-ui.html` | Interactive browser-based API explorer with pre-populated request schemas |
 | **OpenAPI 3.1 Spec** | [`docs/openapi.json`](openapi.json) & `http://localhost:8080/v3/api-docs` | Machine-readable contract for client SDK generation or Postman import |
+| **Grafana Dashboard & Prometheus UI** | `http://localhost:3000` (Grafana) & `http://localhost:9090` (Prometheus) | Auto-provisioned real-time observability dashboard tracking booking outcomes, latency quantiles, RPS, and HikariCP pool utilization |
 | **Automated CLI Demo & Burst Harness** | [`scripts/demo.ps1`](../scripts/demo.ps1) (PowerShell) / [`scripts/demo.sh`](../scripts/demo.sh) (Bash) | Executes catalog discovery, availability checks, booking, a **12-request concurrent burst**, cancellation, capacity recovery, and Prometheus metric inspection |
 
 ---
@@ -143,8 +144,8 @@ Every error response includes `type`, `title`, `status`, `detail`, `instance`, `
      - Rejecting distributed Redis locks in favor of single-source-of-truth PostgreSQL row locks + GiST exclusion constraints.
      - Catching subtle `SKIP LOCKED` false `409` conflicts on single-bay non-overlapping concurrent bookings and `READ COMMITTED` subquery snapshot staleness.
      - Selecting hybrid Spring Data JPA (`ddl-auto: validate`, `open-in-view: false`, `NORMALIZE_UTC`) + custom native SQL locking fragment, and catching the `+07:00` host `LocalTime` offset trap via integration tests.
-4. **4:30 – 6:15 | Live Demo (`scripts/demo.ps1` + Swagger UI + Concurrency Tests)**
-   - Run `.\scripts\demo.ps1` against `docker compose up -d`: show single booking, **12-request concurrent EV burst** (`2 Created`, `10 Conflict`), cancellation & immediate slot recovery, and `/actuator/prometheus` counters.
+4. **4:30 – 6:15 | Live Demo (`scripts/demo.ps1` + Grafana UI + Swagger UI + Concurrency Tests)**
+   - Run `.\scripts\demo.ps1` against `docker compose up -d`: show single booking, **12-request concurrent EV burst** (`2 Created`, `10 Conflict`), cancellation & immediate slot recovery, and watch the live charts update on **Grafana (`http://localhost:3000`)**.
    - Briefly show `.\mvnw.cmd test "-Dtest=AppointmentConcurrencyIntegrationTest"` passing 50 simultaneous Virtual Threads synchronized on a `CyclicBarrier`.
 5. **6:15 – 7:00 | Takeaways & Production Evolution**
    - Discuss key learnings around database snapshot isolation vs row locks, observability (`X-Correlation-ID`, Logstash JSON logs, OpenTelemetry bridge), and future extensions (multi-day repair orders, technician shift calendars, outbox event publishing).
